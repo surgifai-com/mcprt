@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "vault-mcp": {
+      "type": "http",
+      "url": "http://localhost:9090/vault-mcp/mcp"
+    },
+    "ga-vyledentistry": {
+      "type": "http",
+      "url": "http://localhost:9090/ga-vyledentistry/mcp"
+    },
+    "ga-victorqnguyen": {
+      "type": "http",
+      "url": "http://localhost:9090/ga-victorqnguyen/mcp"
+    },
+    "ga-surgifai": {
+      "type": "http",
+      "url": "http://localhost:9090/ga-surgifai/mcp"
+    },
+    "google-ads": {
+      "type": "http",
+      "url": "http://localhost:9090/google-ads/mcp"
+    }
+  }
+}

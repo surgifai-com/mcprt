@@ -1,0 +1,39 @@
+# mcprt.toml — example translated from ~/Library/LaunchAgents/com.victor.*.plist
+
+[runtime]
+listen = "127.0.0.1:9090"
+log_level = "info"
+grace_period = "5s"
+
+# Google Analytics — Vyle Dentistry
+[server.ga-vyledentistry]
+exec = ["~/Library/Application Support/claude-mcp/google-analytics-mcp/.venv/bin/analytics-mcp"]
+args = ["--port", "${MCPRT_PORT}", "--host", "127.0.0.1"]
+env = { GOOGLE_APPLICATION_CREDENTIALS = "~/Library/Application Support/claude-mcp/google-analytics-mcp/credentials/vyledentistry.json" }
+
+# Google Analytics — victorqnguyen.com
+[server.ga-victorqnguyen]
+exec = ["~/Library/Application Support/claude-mcp/google-analytics-mcp/.venv/bin/analytics-mcp"]
+args = ["--port", "${MCPRT_PORT}", "--host", "127.0.0.1"]
+env = { GOOGLE_APPLICATION_CREDENTIALS = "~/Library/Application Support/claude-mcp/google-analytics-mcp/credentials/victorqnguyen.json" }
+
+# Google Analytics — Surgifai
+[server.ga-surgifai]
+exec = ["~/Library/Application Support/claude-mcp/google-analytics-mcp/.venv/bin/analytics-mcp"]
+args = ["--port", "${MCPRT_PORT}", "--host", "127.0.0.1"]
+env = { GOOGLE_APPLICATION_CREDENTIALS = "~/Library/Application Support/claude-mcp/google-analytics-mcp/credentials/surgifai.json" }
+
+# Google Ads
+[server.google-ads]
+exec = ["~/Library/Application Support/claude-mcp/google-ads-mcp/.venv/bin/python"]
+args = ["-m", "ads_mcp.server", "--port", "${MCPRT_PORT}"]
+working_dir = "~/Library/Application Support/claude-mcp/google-ads-mcp"
+env = { GOOGLE_ADS_DEVELOPER_TOKEN = "q0xp58tdFXTXkMLDBe0Dlg", GOOGLE_ADS_MCP_OAUTH_CLIENT_ID = "1099014455647-usivcdlqtdim3el7bfcaps59mik0jvqc.apps.googleusercontent.com", GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET = "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" }
+acknowledged_stdio_safe = true  # python launching an HTTP MCP server, not STDIO
+
+# Vault RAG (local)
+[server.vault-mcp]
+exec = ["/Volumes/M2-2TB/vault-mcp/.venv/bin/vault-mcp"]
+args = ["--port", "${MCPRT_PORT}", "--host", "127.0.0.1"]
+working_dir = "/Volumes/M2-2TB/vault-mcp"
+health_path = "/health"

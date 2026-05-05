@@ -1,18 +1,56 @@
 # mcprt
 
-**MCP runtime for developers who care about memory, security, and not getting paged at 3am.**
-
-`mcprt` is a single Go binary that manages your local MCP servers on demand. Servers start when a client connects and stop when the last client disconnects — no timeouts, no always-on processes, no idle RAM tax.
+**On-demand process supervisor for Streamable-HTTP MCP servers.**  
+Servers spawn when a client connects. They stop when the last client disconnects.  
+No timeouts. No always-on resident processes. STDIO transport refused.
 
 **License**: Apache 2.0 — Copyright 2026 Surgifai / Victor Q. Nguyen
 
 ---
 
+This is why it was built:
+
+```
+panic(cpu 1 caller 0xfffffe0034ce0f2c): watchdog timeout: no checkins from
+watchdogd in 93 seconds
+Compressor Info: 100% of segments limit (BAD) with 45 swapfiles
+```
+
+A 16 GB Apple Silicon Mac Mini running five always-on MCP servers hit VM compressor saturation and hard-rebooted — twice. Stopping the MCP services reclaimed ~500 MB of idle RAM and eliminated the panics. The open question was how to get that memory back without losing the servers when actually needed. This is the answer.
+
+---
+
+## Is this for you?
+
+| Your situation | mcprt |
+|---|---|
+| Running 3+ local MCP servers (Claude Code, Cline, Continue) | Yes — this is the core use case |
+| On a memory-constrained machine (8–16 GB) | Yes — idle footprint drops to ~30 MB total |
+| MCP servers that crash mid-session and you want auto-restart | Yes — supervisor handles it |
+| Building a tool that embeds MCP lifecycle management | Yes — library-first design |
+| Your MCP servers use STDIO transport | No — mcprt refuses STDIO unconditionally (see [why](#problem-3-stdio-transport-is-a-security-liability-hiding-in-plain-sight)) |
+| Need multi-host or cloud MCP orchestration | No — single host only, by design |
+
+---
+
+## How it compares
+
+| Approach | Idle RAM | Cold-start | STDIO | Infrastructure |
+|---|---|---|---|---|
+| Always-on launchd/systemd services | ~100–300 MB per server | 0 ms | Yes | None |
+| Idle-timeout eviction (mcp-hub, scripts) | Partial savings | 0 ms if warm | Yes | None |
+| **mcprt** | **~30 MB total** | **~500 ms** | **No — refused** | **None** |
+| microsoft/mcp-gateway | High | ~0 ms | Yes (wrapper) | Kubernetes + Redis + Azure |
+
+The tradeoff mcprt makes explicitly: you pay ~500 ms cold-start latency on the first connection after the server has been idle. In exchange you get near-zero idle memory and a hard STDIO prohibition. If you need sub-100ms cold starts or STDIO support, mcprt is not your tool.
+
+---
+
 ## Problems
 
-### Problem 1: Your MCP servers are always on, burning hundreds of megabytes around the clock
+### Problem 1: MCP server processes stay resident forever, burning memory around the clock
 
-Every MCP server you add to `~/.claude/mcp.json` (or your Cline/Continue config) spawns a process that stays resident forever — whether you're using it or not. A typical local stack:
+Every server you add to `~/.claude/mcp.json` (or your Cline/Continue config) spawns a process that runs 24/7 — whether you're using it or not:
 
 | Server | Idle RSS |
 |---|---|
@@ -20,113 +58,112 @@ Every MCP server you add to `~/.claude/mcp.json` (or your Cline/Continue config)
 | google-analytics-mcp | ~110 MB |
 | google-ads-mcp | ~115 MB |
 | chrome-devtools-mcp | ~60 MB |
-| **Total** | **~565 MB** |
+| **Total, 4 servers** | **~565 MB always occupied** |
 
-That's over half a gigabyte reserved for tools you might not touch for hours. On a 16 GB machine this crowds out your actual work. On an 8 GB machine it causes swap. On Apple Silicon it can push the VM compressor into saturation — which on macOS triggers a watchdog panic and a hard reboot. This is not hypothetical; it's what prompted mcprt's creation.
+On 8 GB machines this directly causes swap. On Apple Silicon it competes with the unified memory pool that GPU and Neural Engine also share. At saturation, macOS watchdogd triggers a kernel panic and the machine reboots.
 
 ### Problem 2: Idle-timeout eviction is the wrong heuristic
 
-The obvious fix — "kill the server if no request in N minutes" — has a fundamental flaw: it asks the wrong question.
+The naive fix — "kill the server if no request in N minutes" — fails in both directions:
 
-- **Too aggressive**: a server mid-task that hasn't received a request in 3 minutes gets killed. The next tool call fails with a connection error. The user blames the AI.
-- **Too lax**: set 30-minute timeouts and you negate the memory savings.
-- **No right answer**: the timeout is tuning a heuristic that's wrong in both directions. The right signal isn't "inactivity" — it's "no open connections."
+- **Too aggressive**: a server mid-task that paused for 3 minutes gets killed. The next tool call fails mid-context. The user blames the AI.
+- **Too lax**: a 30-minute timeout barely saves memory during typical work sessions.
+- **Fundamentally wrong signal**: "inactivity" and "no open connections" are different things. A server can be silent for 10 minutes because the model is reasoning, not because the session ended. Only connection close is the reliable termination signal.
 
-Idle-timeout eviction exists in mcp-hub, various shell scripts, and homebuilt wrappers. mcprt explicitly does not implement it.
+mcp-hub and most homebuilt shell wrappers implement idle-timeout. mcprt explicitly does not.
 
 ### Problem 3: STDIO transport is a security liability hiding in plain sight
 
-In April 2026, OX Security disclosed 14 CVEs across 200K+ MCP servers totaling 150M+ downloads — LiteLLM, LangChain, LangFlow, Flowise, LettaAI, LangBot. The root cause: MCP runtimes that use STDIO transport, treating your `mcp.json` as an `exec` list. Any manifest entry pointing at a malicious package gets run with your full user context, credential access, and filesystem permissions. Anthropic classified the design as intentional and has no patch plans.
+In April 2026, OX Security disclosed 14 CVEs across the MCP ecosystem — LiteLLM, LangChain, LangFlow, Flowise, LettaAI, LangBot — affecting 200K+ server deployments and 150M+ package downloads. Root cause: STDIO transport runtimes treat `mcp.json` as an exec list. A malicious or compromised package entry runs with your full user context, filesystem access, and credential environment. Anthropic acknowledged this is intentional behavior and has no plans to patch it.
 
-This means the STDIO runtimes shipped by default — including Anthropic's own `mcp-builder` skill and Claude Desktop's process model — are load-bearing attack surface for supply-chain compromises.
+The STDIO process model used by Claude Desktop, Anthropic's `mcp-builder` skill, and most MCP documentation is load-bearing attack surface. mcprt's policy validator catches this at config load — before any process runs.
 
-### Problem 4: The heavyweight alternatives require infrastructure you don't have
+### Problem 4: The only alternative that exists is enterprise infrastructure for a single-developer problem
 
-[microsoft/mcp-gateway](https://github.com/microsoft/mcp-gateway) is a real system with real engineering behind it. It is also Kubernetes StatefulSets, Redis, Azure Entra ID, and a STDIO-wrapper proxy. Wrong scale for a laptop. Wrong security model for a single developer. Wrong everything.
+[microsoft/mcp-gateway](https://github.com/microsoft/mcp-gateway) is competently built. It is also Kubernetes StatefulSets, Redis, Azure Entra ID, a STDIO-wrapper proxy, and a dedicated ops team. The engineering cost of running mcp-gateway for a local developer setup exceeds the cost of the problem it's solving.
+
+There was no lightweight, opinionated, single-binary tool that said "MCP servers should run iff a client is talking to them." mcprt is that tool.
 
 ---
 
 ## How mcprt solves it
 
-### Solution to Problem 1: Connection-refcounted lifecycle
+### Connection-refcounted lifecycle
 
-mcprt proxies all your MCP servers through a single local port (`127.0.0.1:9090`). Each server gets a named route (`/vault-mcp/...`, `/ga-surgifai/...`). The server process only exists while a client is connected.
+mcprt runs a single proxy on `127.0.0.1:9090`. Each MCP server gets a named route (`/vault-mcp/...`, `/ga-surgifai/...`). The upstream process only exists while at least one client connection is open.
 
 ```
-Before (always-on):   vault-mcp + 3× analytics-mcp + ads-mcp = ~565 MB idle
-After (mcprt):        mcprt daemon only                        = ~30 MB idle
+Before (always-on launchd):   4 MCP servers = ~565 MB idle, always
+After  (mcprt):               mcprt daemon only = ~30 MB idle
+                              servers spawn on first connection, ~500ms cold start
+                              servers stop ~5s after last client disconnects
 ```
 
-When Claude Code opens a session, `vault-mcp` spawns in ~500ms. When the session ends, `vault-mcp` gets SIGTERM. The debounce window (default 5s) absorbs rapid reconnects so you don't thrash on reconnect.
+### Refcount, not timeout
 
-### Solution to Problem 2: Refcount, not timeout
+mcprt reads two signals from the MCP Streamable HTTP transport:
 
-mcprt tracks two connection signals from the MCP Streamable HTTP transport:
+- **Primary**: open SSE streams (`Accept: text/event-stream`). One open stream = `refcount++` for that server.
+- **Secondary**: `Mcp-Session-Id` headers on POST requests without an SSE stream. Tracked as ephemeral sessions — the ref is held until the TCP connection closes, not until a timer fires.
 
-- **Primary**: persistent SSE streams (`Accept: text/event-stream`). One open SSE = +1 to the server's refcount.
-- **Secondary**: `Mcp-Session-Id` headers on POST requests with no accompanying SSE. These are tracked as ephemeral sessions tied to the TCP connection's lifetime — not a wall-clock timer.
+Lifecycle transitions:
+- `refcount 0 → 1`: proxy holds the request, spawns upstream, waits for health check (default max 5s), then forwards.
+- `refcount stable at 0 for grace_period (default 5s)`: SIGTERM → SIGKILL after grace window.
 
-When refcount drops to zero **and stays there** for the grace period, the server stops. "Stays there" is the key phrase. A server mid-task with an active SSE stream has refcount ≥ 1. It cannot be killed by this logic, regardless of how long it's been since the last tool call.
+A server mid-task has at least one open SSE stream. Refcount is ≥ 1. It cannot be stopped by this logic no matter how long the model takes to respond. This is the categorical difference from idle-timeout.
 
-This is a debounce against spawn/kill thrash, not an idle timeout. The mechanism is categorically different.
-
-### Solution to Problem 3: STDIO refused at config load
-
-mcprt's policy validator runs before any process is spawned. It hard-refuses specs that:
-
-- Use process launchers (`npx`, `node`, `python`, `python3`, `deno`, `bun`) without explicit opt-in
-- Match known STDIO MCP package patterns (`@modelcontextprotocol/server-*`, `mcp-server-*`, `-mcp-server`)
-- Have no port binding argument — meaning they cannot be reverse-proxied and must be using STDIO
-
-STDIO is not a configurable default. It is not a flag. It is not behind `--allow-stdio`. The policy validator treats it as a vulnerability finding, not a style preference. If you have a Python binary that genuinely binds an HTTP port, you set `acknowledged_stdio_safe = true` and get a logged warning confirming that's intentional.
+### STDIO refused at config load — before any process runs
 
 ```
 $ mcprt validate ~/.config/mcprt/mcprt.toml
 
-ERROR  server "my-server": exec uses "npx" — a process launcher that commonly
-       wraps STDIO MCPs. If this binary genuinely starts an HTTP MCP server,
-       set acknowledged_stdio_safe=true.
-ERROR  server "my-server": arg "@modelcontextprotocol/server-filesystem" matches
-       known STDIO MCP package pattern "@modelcontextprotocol/server-".
+ERROR   [error] server "bad-server": exec uses "npx" — a process launcher that
+        commonly wraps STDIO MCPs. If this binary genuinely starts an HTTP MCP
+        server, set acknowledged_stdio_safe=true.
+ERROR   [error] server "bad-server": arg "@modelcontextprotocol/server-filesystem"
+        matches known STDIO MCP package pattern "@modelcontextprotocol/server-".
+ERROR   [error] server "bad-server": server args do not contain ${MCPRT_PORT} or
+        a --port/--bind flag; mcprt cannot determine where to proxy requests
+
+~/.config/mcprt/mcprt.toml: 2 error(s), 0 warning(s)
+exit code 1
 ```
 
-`mcprt validate` exits non-zero on errors. Wire it into your CI.
+The validator runs at startup and on every hot-reload. Refused entries cannot slip through between reloads. `mcprt validate` exits non-zero — wire it into CI.
 
-### Solution to Problem 4: Single binary, zero runtime deps
+Detected patterns: `npx`, `node`, `python`, `python3`, `deno`, `bun` as exec binary; `@modelcontextprotocol/server-*`, `mcp-server-*`, `-mcp-server` as package name fragments; missing `--port`/`${MCPRT_PORT}` argument.
 
-mcprt is one ~10 MB Go binary. No Docker. No Kubernetes. No Redis. No cloud account. It ships a macOS launchd plist and a systemd unit. If you use Homebrew, one command installs it.
-
-The library (`pkg/runtime`, `pkg/proxy`, `pkg/supervisor`, `pkg/manifest`, `pkg/policy`) is importable. If you're building a Claude Code wrapper, a Cline plugin, or a custom dashboard, you embed the library and own the lifecycle.
+To acknowledge a Python binary that genuinely binds HTTP: set `acknowledged_stdio_safe = true` — you get a warning logged at every load as an audit trail.
 
 ---
 
 ## Architecture
 
 ```
-Client (Claude Code, Cline, Continue)
-        │
+Claude Code / Cline / Continue
+        │  HTTP  (Streamable HTTP transport)
         ▼
-mcprt proxy :9090
+mcprt  127.0.0.1:9090
         │
-        ├── /vault-mcp/...    ── RefCounter ── Supervisor ── vault-mcp :19000
-        ├── /ga-surgifai/...  ── RefCounter ── Supervisor ── (idle, not spawned)
-        └── /google-ads/...   ── RefCounter ── Supervisor ── (idle, not spawned)
+        ├─ /vault-mcp/...    RefCounter ── Supervisor ── vault-mcp  :19000  (running)
+        ├─ /ga-surgifai/...  RefCounter ── Supervisor ── analytics  :19001  (idle)
+        └─ /google-ads/...   RefCounter ── Supervisor ── ads-mcp    :19002  (idle)
 ```
 
-- **Proxy** routes on the first path segment, strips it, and forwards to the upstream port.
-- **RefCounter** tracks open SSE streams and ephemeral session IDs. Fires the stop callback after the grace period debounce when refcount reaches zero.
-- **Supervisor** manages the process: `idle → spawning → running → stopping`. Health-checks via configurable HTTP path or 500ms fixed delay. SIGTERM → SIGKILL after grace window.
-- **Runtime** owns port allocation, fsnotify hot-reload, and reconciliation diffs on config change.
+- **Proxy** (`pkg/proxy`): routes on first path segment, strips it, reverse-proxies to upstream.
+- **RefCounter** (`pkg/proxy`): tracks SSE streams + ephemeral sessions; debounces zero-transition.
+- **Supervisor** (`pkg/supervisor`): `idle → spawning → running → stopping`; health-check poll; SIGTERM + SIGKILL.
+- **Runtime** (`pkg/runtime`): dynamic port allocation; fsnotify hot-reload; reconciliation diff on config change.
 
 ---
 
 ## Quickstart
 
 ```sh
-# Install (manual until Homebrew formula ships)
+# Install
 go install github.com/victorqnguyen/mcprt/cmd/mcprt@latest
 
-# Write config
+# Config
 mkdir -p ~/.config/mcprt
 cat > ~/.config/mcprt/mcprt.toml << 'EOF'
 [runtime]
@@ -144,26 +181,28 @@ args = ["--port", "${MCPRT_PORT}", "--host", "127.0.0.1"]
 env  = { GOOGLE_APPLICATION_CREDENTIALS = "~/.config/mcprt/secrets/mysite.json" }
 EOF
 
-# Validate before starting anything
+# Validate (catches STDIO violations before anything runs)
 mcprt validate ~/.config/mcprt/mcprt.toml
 
-# Run
+# Start
 mcprt serve
-
-# Point your MCP client at it — Claude Code example:
-# ~/.claude/mcp.json:
-# {
-#   "mcpServers": {
-#     "vault-mcp": { "type": "http", "url": "http://localhost:9090/vault-mcp/mcp" },
-#     "ga-mysite": { "type": "http", "url": "http://localhost:9090/ga-mysite/mcp" }
-#   }
-# }
 ```
 
-**Run as a macOS service** (starts at login, stays out of your way):
+**Point Claude Code at mcprt** (`~/.claude/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "vault-mcp":  { "type": "http", "url": "http://localhost:9090/vault-mcp/mcp" },
+    "ga-mysite":  { "type": "http", "url": "http://localhost:9090/ga-mysite/mcp" }
+  }
+}
+```
+
+**macOS service** (starts at login):
 
 ```sh
-# Edit dist/launchd/com.mcprt.daemon.plist — replace YOUR_USERNAME
+# Edit dist/launchd/com.mcprt.daemon.plist — substitute YOUR_USERNAME
 cp dist/launchd/com.mcprt.daemon.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.mcprt.daemon.plist
 ```
@@ -176,83 +215,69 @@ launchctl load ~/Library/LaunchAgents/com.mcprt.daemon.plist
 [runtime]
 listen       = "127.0.0.1:9090"   # proxy bind address
 log_level    = "info"              # debug | info | warn | error
-grace_period = "5s"                # debounce window before stopping idle server
+grace_period = "5s"                # debounce before stopping (not an idle timeout)
 
 [server.<name>]
-exec                    = ["/abs/path/to/binary"]      # required
-args                    = ["--port", "${MCPRT_PORT}"]  # ${MCPRT_PORT} → dynamic allocation
-env                     = { KEY = "value" }            # merged with OS environment
-health_path             = "/health"                    # HTTP GET probe; omit for 500ms delay
-working_dir             = "/path/to/dir"
-allow_external          = false   # allow non-loopback bind addresses
-acknowledged_stdio_safe = false   # suppress STDIO launcher warning (document why)
+exec                    = ["/abs/path/to/binary"]
+args                    = ["--port", "${MCPRT_PORT}", "--host", "127.0.0.1"]
+env                     = { KEY = "value" }
+health_path             = "/health"    # HTTP GET probe; omit for 500ms fixed delay
+working_dir             = "/path/to"
+allow_external          = false        # non-loopback bind; default false
+acknowledged_stdio_safe = false        # suppress launcher warning; leave a comment why
 ```
 
-`${MCPRT_PORT}` is the only magic variable. mcprt allocates a port per server starting at 19000 and substitutes it everywhere in `args` and `env`.
+`${MCPRT_PORT}` is the only variable. mcprt allocates one port per server from 19000 upward and substitutes it in both `args` and `env`.
 
 ---
 
 ## CLI
 
-| Command | Description |
+| Command | What it does |
 |---|---|
 | `mcprt serve` | Start the proxy daemon |
-| `mcprt validate <file>` | Check a manifest; exits 1 on policy errors |
-| `mcprt validate --json <file>` | Machine-readable violations list |
-| `mcprt status` | Snapshot of all servers: state, PID, port, restart count |
+| `mcprt validate <file>` | Policy check; exits 1 on errors |
+| `mcprt validate --json <file>` | Same, machine-readable |
+| `mcprt status` | State, PID, port, restart count for all servers |
 | `mcprt status --json` | Same, as JSON |
 
-Edits to `mcprt.toml` are picked up automatically while `serve` is running. New servers are added to the registry; removed servers are stopped; mutated running servers are restarted. Policy is re-validated on every reload — an invalid edit is logged and rejected without disrupting running servers.
+Hot-reload is automatic — edit `mcprt.toml` while `serve` is running. Policy re-validates on every reload; invalid entries are refused without disrupting running servers.
 
 ---
 
 ## Embedding the library
 
-mcprt is a Go library first. The CLI is one consumer. Build your own:
+The CLI is one consumer of the library. Import it directly:
 
 ```go
 import (
-    "context"
-    "github.com/victorqnguyen/mcprt/pkg/runtime"
-    "github.com/victorqnguyen/mcprt/pkg/policy"
     "github.com/victorqnguyen/mcprt/pkg/manifest"
+    "github.com/victorqnguyen/mcprt/pkg/policy"
+    "github.com/victorqnguyen/mcprt/pkg/runtime"
 )
 
-// Validate without starting anything
+// Lint a manifest without starting anything
 cfg, _ := manifest.Load("mcprt.toml")
 violations := policy.Validate(cfg)
 
-// Full runtime with hooks
+// Full runtime with state hooks
 rt, _ := runtime.New(runtime.Options{ManifestPath: "mcprt.toml"})
-rt.OnSpawn = func(name string) { dashboard.SetRunning(name) }
-rt.OnExit  = func(name string) { dashboard.SetIdle(name) }
+rt.OnSpawn = func(name string) { /* dashboard: mark running */ }
+rt.OnExit  = func(name string) { /* dashboard: mark idle */ }
 rt.Serve(ctx)
 ```
 
-Public API surface: `runtime.Runtime`, `manifest.Config`, `manifest.ServerSpec`, `proxy.Handler`, `proxy.RefCounter`, `supervisor.Supervisor`, `supervisor.Stats`, `policy.Validate`, `policy.Violation`.
-
----
-
-## Why this exists
-
-mcprt was built to solve a real hardware problem. A 16 GB Apple Silicon Mac Mini running five always-on MCP servers hit VM compressor saturation — 100% of compression segments, 45 swapfiles — and triggered kernel watchdog panics. The machine rebooted. Logs confirmed:
-
-```
-panic: watchdog timeout: no checkins from watchdogd in 93 seconds
-Compressor Info: 100% of segments limit (BAD) with 45 swapfiles
-```
-
-Turning off the MCP servers reclaimed ~500 MB of idle RAM and eliminated the panics. The question was how to get that memory back without losing the servers when actually needed. Idle timeouts were wrong. Always-on was untenable. Connection-refcounting was the correct primitive — it had just never been built as a standalone tool for the MCP ecosystem.
+Public API: `runtime.Runtime`, `manifest.Config`, `manifest.ServerSpec`, `proxy.Handler`, `proxy.RefCounter`, `supervisor.Supervisor`, `supervisor.Stats`, `policy.Validate`, `policy.Violation`.
 
 ---
 
 ## Security model
 
-- All upstream servers bind `127.0.0.1` by default. External binding requires explicit `allow_external = true`.
-- STDIO transport is refused unconditionally — not configurable, not behind a flag.
-- The policy validator runs at startup and on every hot-reload. A bad manifest entry cannot slip through between reloads.
-- mcprt does not store, log, or proxy credentials. Environment variables are passed to child processes as specified — same as launchd would.
-- The proxy strips the `/<server-name>` path prefix before forwarding. The upstream server sees only its own routes.
+- Upstream servers bind `127.0.0.1` by default. `allow_external = true` required for any other interface.
+- STDIO refused unconditionally. Not a flag. Not a default. A hard validator error.
+- Policy runs at startup and on every hot-reload — no window between reloads where a bad entry can run.
+- mcprt does not log, store, or inspect credential values. Env vars pass to child processes as-is.
+- Path prefix is stripped before forwarding — upstream servers see only their own routes.
 
 ---
 
@@ -260,29 +285,33 @@ Turning off the MCP servers reclaimed ~500 MB of idle RAM and eliminated the pan
 
 - [ ] `mcprt status --watch` — live TUI (bubbletea)
 - [ ] `mcprt logs <server>` — tail per-server stdout/stderr
-- [ ] `mcprt up <server>` / `mcprt down <server>` — manual overrides
-- [ ] Prometheus `/metrics` endpoint (opt-in)
+- [ ] `mcprt up <server>` / `mcprt down <server>` — manual overrides without editing config
+- [ ] Prometheus `/metrics` endpoint (opt-in, off by default)
 - [ ] Homebrew formula
 - [ ] systemd unit (`dist/systemd/`)
-- [ ] RSS sampling via gopsutil (already a dep, not yet wired to status output)
+- [ ] RSS + CPU sampling in `mcprt status` (gopsutil already a dep)
 
-Explicitly out of scope: multi-host clustering, GUI dashboard, idle-timeout fallback, STDIO support of any kind.
+**Explicitly out of scope for v1:** multi-host clustering, web/GUI dashboard, idle-timeout fallback mode, STDIO support of any kind. These are not future features. They are non-goals.
 
 ---
 
 ## Contributing
 
-Apache 2.0. PRs welcome. If you're adding a detection rule to the policy validator, include the CVE or disclosure link in the commit message. If you're adding a transport, it must be Streamable HTTP — STDIO PRs will be closed.
+Apache 2.0. PRs welcome.
+
+Rules:
+- Policy validator additions require a CVE reference or public disclosure link in the commit message.
+- Transport additions must use Streamable HTTP. STDIO PRs will be closed without discussion.
 
 ```
 mcprt/
 ├── pkg/
-│   ├── manifest/   TOML loader + schema
-│   ├── policy/     Validator + violation types
-│   ├── proxy/      HTTP reverse proxy + RefCounter
-│   ├── supervisor/ Process lifecycle
-│   └── runtime/    Orchestrator + hot-reload
-├── cmd/mcprt/      CLI entry point
-├── dist/           Platform integration (launchd, systemd, homebrew)
-└── examples/       mcprt.toml + mcp.json samples
+│   ├── manifest/   TOML loader, schema, ~ and ${MCPRT_PORT} expansion
+│   ├── policy/     STDIO detector, port-binding check, violation types
+│   ├── proxy/      Streamable HTTP reverse proxy, RefCounter
+│   ├── supervisor/ Process lifecycle state machine
+│   └── runtime/    Orchestrator, port allocator, fsnotify hot-reload
+├── cmd/mcprt/      CLI (serve, validate, status)
+├── dist/           launchd plist template (systemd + Homebrew coming)
+└── examples/       mcprt.toml + mcp.json for Claude Code
 ```

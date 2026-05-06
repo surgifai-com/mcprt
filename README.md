@@ -16,7 +16,9 @@ watchdogd in 93 seconds
 Compressor Info: 100% of segments limit (BAD) with 45 swapfiles
 ```
 
-A 16 GB Apple Silicon Mac Mini running five always-on MCP servers hit VM compressor saturation and hard-rebooted — twice. Stopping the MCP services reclaimed ~500 MB of idle RAM and eliminated the panics. The open question was how to get that memory back without losing the servers when actually needed. This is the answer.
+A 16 GB Apple Silicon Mac Mini hard-rebooted twice during a Next.js build. The build triggered the VM compressor saturation, but a process audit showed why there was no headroom: MCP servers and their child processes were holding ~1.5 GB of resident memory at idle. Chrome DevTools MCP had spawned duplicate instances — two server processes, two npm parents, two node watchdogs — eating 1.2 GB alone. Add vault-mcp (122 MB), surgifai-coderag (229 MB), colab-mcp (100 MB), LiteLLM (331 MB), and the Claude session itself (718 MB), and nearly 3 GB was spoken for before the build even started. On unified memory that competes directly with GPU allocation.
+
+Stopping the MCP services eliminated the panics. They were the easiest ~1.5 GB to reclaim without losing anything actively in use. The open question was how to get that memory back without losing the servers when actually needed. This is the answer.
 
 ---
 
@@ -50,17 +52,23 @@ The tradeoff mcprt makes explicitly: you pay ~500 ms cold-start latency on the f
 
 ### Problem 1: MCP server processes stay resident forever, burning memory around the clock
 
-Every server you add to `~/.claude/mcp.json` (or your Cline/Continue config) spawns a process that runs 24/7 — whether you're using it or not:
+Every server you add to `~/.claude/mcp.json` (or your Cline/Continue config) spawns a process that runs 24/7 — whether you're using it or not. An actual process audit on the machine that triggered this project:
 
-| Server | Idle RSS |
+| Process | Idle RSS |
 |---|---|
-| vault-mcp (bge-m3 embeddings loaded) | ~280 MB |
-| google-analytics-mcp | ~110 MB |
-| google-ads-mcp | ~115 MB |
-| chrome-devtools-mcp | ~60 MB |
-| **Total, 4 servers** | **~565 MB always occupied** |
+| claude (active session) | 718 MB |
+| chrome-devtools-mcp × 2 duplicate instances | 460 MB |
+| npm × 2 (parents of above) | 347 MB |
+| node watchdogs × 2 (for above) | 429 MB |
+| litellm python | 331 MB |
+| surgifai-coderag node | 229 MB |
+| omlx serve (local ML model server) | 125 MB |
+| vault-mcp | 122 MB |
+| colab-mcp | 100 MB |
+| openclaw gateway | ~50 MB |
+| **Total** | **~2.9 GB** |
 
-On 8 GB machines this directly causes swap. On Apple Silicon it competes with the unified memory pool that GPU and Neural Engine also share. At saturation, macOS watchdogd triggers a kernel panic and the machine reboots.
+Plus Docker. On a 16 GB unified memory machine, that's nearly 20% consumed before opening a browser — and it competes directly with GPU allocation for any local model work. The Chrome DevTools MCP spawning twice (1.2 GB for one tool) is the kind of silent failure that STDIO transport makes easy and invisible.
 
 ### Problem 2: Idle-timeout eviction is the wrong heuristic
 
@@ -95,8 +103,8 @@ There was no lightweight, opinionated, single-binary tool that said "MCP servers
 mcprt runs a single proxy on `127.0.0.1:9090`. Each MCP server gets a named route (`/vault-mcp/...`, `/ga-surgifai/...`). The upstream process only exists while at least one client connection is open.
 
 ```
-Before (always-on launchd):   4 MCP servers = ~565 MB idle, always
-After  (mcprt):               mcprt daemon only = ~30 MB idle
+Before (always-on launchd):   MCP servers alone = ~1.5 GB idle, always
+After  (mcprt):               mcprt daemon only = ~16 MB idle
                               servers spawn on first connection, ~500ms cold start
                               servers stop ~5s after last client disconnects
 ```

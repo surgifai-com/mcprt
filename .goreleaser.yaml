@@ -54,7 +54,7 @@ changelog:
 
 release:
   github:
-    owner: victorqnguyen
+    owner: surgifai-com
     name: mcprt
   draft: true
   prerelease: auto

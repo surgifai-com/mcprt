@@ -139,6 +139,55 @@ To acknowledge a Python binary that genuinely binds HTTP: set `acknowledged_stdi
 
 ---
 
+## Stress test results
+
+Concurrent cold-start of 4 MCP servers (vault-mcp, surgifai-coderag, Google Analytics, Google Ads) on a Mac Mini M2, sampled every 3 seconds.
+
+```
+timestamp   mcprt    vault     coderag   GA        Ads      children
+─────────────────────────────────────────────────────────────────────
+17:12:51    16.3 MB   0.0 MB    0.0 MB   0.0 MB   0.0 MB   0   ← idle
+17:12:54    16.3 MB   0.0 MB    0.0 MB   0.0 MB   0.0 MB   0
+17:13:07    16.3 MB   0.0 MB    0.0 MB   0.0 MB   0.0 MB   1   ← first spawn
+17:13:10    16.5 MB  121.0 MB  233.9 MB  0.0 MB   0.0 MB   2
+17:13:13    16.5 MB   0.0 MB   235.2 MB 142.9 MB 143.5 MB  3   ← peak load
+17:13:16    16.6 MB   0.0 MB   235.2 MB 142.9 MB 143.8 MB  3
+17:13:20    16.6 MB   0.0 MB    0.0 MB   0.0 MB   0.0 MB   0   ← all idle
+17:13:23    16.6 MB   0.0 MB    0.0 MB   0.0 MB   0.0 MB   0
+```
+
+**mcprt daemon idle RSS: 16.6 MB.** At peak concurrent load across 4 servers the daemon itself grew by less than 1 MB — all the memory is in the child processes, which are reclaimed within `grace_period` of the last client disconnecting.
+
+State machine log during the same run:
+
+```
+17:13:07  INFO  cold start triggered          server=vault-mcp
+17:13:07  INFO  state change  idle→spawning   server=vault-mcp
+17:13:08  INFO  state change  spawning→running server=vault-mcp   ← health passed in 800ms
+17:13:09  INFO  cold start triggered          server=surgifai-coderag
+17:13:09  INFO  state change  idle→spawning   server=surgifai-coderag
+17:13:11  INFO  state change  spawning→running server=surgifai-coderag
+17:13:11  INFO  cold start triggered          server=ga-vyledentistry
+17:13:11  INFO  state change  idle→spawning   server=ga-vyledentistry
+17:13:12  INFO  state change  spawning→running server=ga-vyledentistry
+17:13:17  INFO  refcount debounce expired, stopping server=ga-vyledentistry
+17:13:17  INFO  sending SIGTERM               server=ga-vyledentistry
+17:13:17  INFO  state change  running→stopping server=ga-vyledentistry
+17:13:18  INFO  process exited                server=ga-vyledentistry  err=<nil>
+17:13:18  INFO  state change  stopping→idle   server=ga-vyledentistry
+```
+
+Server responses confirmed during the run:
+
+| Server | Status | Version | Tools |
+|---|---|---|---|
+| vault-mcp | ✅ | vault_mcp 1.27.0 | 3 (query, fetch, stats) |
+| surgifai-coderag | ✅ | surgifai-coderag 0.1.0 | 36 |
+| ga-vyledentistry | ✅ | Google Analytics MCP | — |
+| google-ads | ✅ | Google Ads Server 3.2.4 | — |
+
+---
+
 ## Architecture
 
 ```

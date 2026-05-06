@@ -153,9 +153,19 @@ func validateServer(name string, spec manifest.ServerSpec) []Violation {
 	return vv
 }
 
-// hasPortBinding returns true if the server spec contains a port substitution
-// token or an explicit --port / -p flag in its arguments.
+// hasPortBinding returns true if the server spec pins a port or contains a
+// port substitution token or an explicit --port / -p flag in its arguments or env.
 func hasPortBinding(spec manifest.ServerSpec) bool {
+	// Static port pin satisfies the requirement — the proxy knows where to forward.
+	if spec.Port > 0 {
+		return true
+	}
+	// Some servers read their port from an env var (e.g. PORT=${MCPRT_PORT}).
+	for _, v := range spec.Env {
+		if strings.Contains(v, "${MCPRT_PORT}") {
+			return true
+		}
+	}
 	allArgs := append(spec.Exec[1:], spec.Args...)
 	for i, arg := range allArgs {
 		if strings.Contains(arg, "${MCPRT_PORT}") {

@@ -32,6 +32,20 @@ type ServerSpec struct {
 	WorkingDir        string            `toml:"working_dir"`
 	AllowExternal     bool              `toml:"allow_external"`
 	AcknowledgedStdioSafe bool          `toml:"acknowledged_stdio_safe"`
+	// Port pins the upstream port instead of using dynamic allocation.
+	// Use this for servers that read their port from a config file rather
+	// than a CLI argument. When set, ${MCPRT_PORT} substitution still works
+	// but is not required by the policy validator.
+	Port int `toml:"port"`
+	// HealthTimeout overrides the global health-check deadline for this server.
+	// Useful for servers with slow startup (e.g. loading large ML models).
+	// Accepts Go duration strings: "30s", "1m", "500ms". Default: 5s.
+	HealthTimeout string `toml:"health_timeout"`
+	// HealthType controls the probe mechanism. Options:
+	//   "http" (default): GET health_path, pass if status < 500
+	//   "tcp":  dial the port, pass when connection is accepted (no HTTP)
+	//   "none": skip health check entirely, use a 500ms fixed delay
+	HealthType string `toml:"health_type"`
 }
 
 // DefaultRuntimeConfig returns conservative defaults.

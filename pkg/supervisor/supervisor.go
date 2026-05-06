@@ -6,12 +6,11 @@ package supervisor
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -167,23 +166,52 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	s.stopCh = make(chan struct{})
 	s.mu.Unlock()
 
-	// Wait for health check.
-	if err := s.waitHealthy(ctx); err != nil {
-		_ = s.killProcess(cmd)
+	// Single cmd.Wait() goroutine — its channel is shared between the health-check
+	// race below and watch() so Wait is only called once.
+	exitCh := make(chan error, 1)
+	go func() { exitCh <- cmd.Wait() }()
+
+	healthCh := make(chan error, 1)
+	go func() { healthCh <- s.waitHealthy(ctx) }()
+
+	select {
+	case exitErr := <-exitCh:
+		// Process died before health check passed.
+		exitCode := -1
+		if cmd.ProcessState != nil {
+			exitCode = cmd.ProcessState.ExitCode()
+		}
+		s.logger.Error("process exited during startup",
+			"exit_code", exitCode, "err", exitErr)
+		msg := fmt.Sprintf("exited during startup (code %d): %v", exitCode, exitErr)
 		s.mu.Lock()
 		s.cmd = nil
 		s.setState(StateIdle)
-		s.lastErr = err.Error()
+		s.lastErr = msg
 		s.mu.Unlock()
-		return fmt.Errorf("health check for %q: %w", s.name, err)
+		close(s.stopCh)
+		return fmt.Errorf("%s", msg)
+
+	case healthErr := <-healthCh:
+		if healthErr != nil {
+			_ = s.killProcess(cmd)
+			// Drain exitCh so the goroutine doesn't leak.
+			go func() { <-exitCh }()
+			s.mu.Lock()
+			s.cmd = nil
+			s.setState(StateIdle)
+			s.lastErr = healthErr.Error()
+			s.mu.Unlock()
+			return fmt.Errorf("health check for %q: %w", s.name, healthErr)
+		}
 	}
 
 	s.mu.Lock()
 	s.setState(StateRunning)
 	s.mu.Unlock()
 
-	// Background goroutine: reap the process and reset state.
-	go s.watch(cmd)
+	// Pass the already-running exitCh to watch so it doesn't re-Wait.
+	go s.watch(cmd, exitCh)
 
 	return nil
 }
@@ -263,46 +291,67 @@ func (s *Supervisor) buildCmd() (*exec.Cmd, error) {
 	}
 
 	// Build environment: inherit OS env, then overlay spec.env.
+	// ${MCPRT_PORT} is substituted in env values too (for servers that read
+	// their port from an env var rather than a CLI flag, e.g. PORT=${MCPRT_PORT}).
 	cmd.Env = os.Environ()
 	for k, v := range spec.Env {
+		v = strings.ReplaceAll(v, "${MCPRT_PORT}", portStr)
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
-	// Always inject the port so servers that read it from env can use it too.
+	// Always inject MCPRT_PORT directly so servers can reference it without
+	// needing a manifest env entry.
 	cmd.Env = append(cmd.Env, "MCPRT_PORT="+portStr)
 
-	// Wire up log files.
-	if s.logDir != "" {
-		if err := os.MkdirAll(s.logDir, 0o755); err != nil {
-			return nil, fmt.Errorf("creating log dir: %w", err)
-		}
-		logPath := filepath.Join(s.logDir, s.name+".log")
-		lf, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-		if err != nil {
-			return nil, fmt.Errorf("opening log file: %w", err)
-		}
-		cmd.Stdout = io.MultiWriter(lf)
-		cmd.Stderr = io.MultiWriter(lf)
-	} else {
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
 	return cmd, nil
 }
 
 func (s *Supervisor) waitHealthy(ctx context.Context) error {
-	healthPath := s.spec.HealthPath
-	if healthPath == "" {
-		// No health path configured — wait a brief fixed delay and assume up.
-		select {
-		case <-time.After(500 * time.Millisecond):
+	switch s.spec.HealthType {
+	case "tcp":
+		return s.waitHealthyTCP(ctx)
+	case "none", "":
+		if s.spec.HealthPath == "" {
+			// No probe configured — brief fixed delay then assume up.
+			select {
+			case <-time.After(500 * time.Millisecond):
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return s.waitHealthyHTTP(ctx)
+	default:
+		return s.waitHealthyHTTP(ctx)
+	}
+}
+
+func (s *Supervisor) waitHealthyTCP(ctx context.Context) error {
+	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
+	deadline := time.Now().Add(s.healthTimeout)
+	dialer := &net.Dialer{Timeout: 300 * time.Millisecond}
+
+	for {
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
+		if err == nil {
+			conn.Close()
 			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for TCP %s after %s", addr, s.healthTimeout)
+		}
+		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
 		}
 	}
+}
 
-	url := fmt.Sprintf("http://127.0.0.1:%d%s", s.port, healthPath)
+func (s *Supervisor) waitHealthyHTTP(ctx context.Context) error {
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", s.port, s.spec.HealthPath)
 	deadline := time.Now().Add(s.healthTimeout)
 	client := &http.Client{Timeout: 500 * time.Millisecond}
 
@@ -326,8 +375,8 @@ func (s *Supervisor) waitHealthy(ctx context.Context) error {
 	}
 }
 
-func (s *Supervisor) watch(cmd *exec.Cmd) {
-	err := cmd.Wait()
+func (s *Supervisor) watch(cmd *exec.Cmd, exitCh <-chan error) {
+	err := <-exitCh
 
 	s.mu.Lock()
 	stopCh := s.stopCh

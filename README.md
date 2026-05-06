@@ -78,6 +78,8 @@ In April 2026, OX Security disclosed 14 CVEs across the MCP ecosystem — LiteLL
 
 The STDIO process model used by Claude Desktop, Anthropic's `mcp-builder` skill, and most MCP documentation is load-bearing attack surface. mcprt's policy validator catches this at config load — before any process runs.
 
+If you need to build an MCP server, use a fork of the skill that enforces Streamable HTTP from the start: [victorqnguyen/skills — mcp-builder](https://github.com/victorqnguyen/skills/tree/main/skills/mcp-builder).
+
 ### Problem 4: The only alternative that exists is enterprise infrastructure for a single-developer problem
 
 [microsoft/mcp-gateway](https://github.com/microsoft/mcp-gateway) is competently built. It is also Kubernetes StatefulSets, Redis, Azure Entra ID, a STDIO-wrapper proxy, and a dedicated ops team. The engineering cost of running mcp-gateway for a local developer setup exceeds the cost of the problem it's solving.
@@ -292,6 +294,63 @@ Public API: `runtime.Runtime`, `manifest.Config`, `manifest.ServerSpec`, `proxy.
 - [ ] RSS + CPU sampling in `mcprt status` (gopsutil already a dep)
 
 **Explicitly out of scope for v1:** multi-host clustering, web/GUI dashboard, idle-timeout fallback mode, STDIO support of any kind. These are not future features. They are non-goals.
+
+---
+
+## Troubleshooting
+
+### macOS: vault-mcp hangs at startup, health check times out
+
+**Symptom:** `spawn failed: health check for "vault-mcp": context deadline exceeded`. The vault-mcp process appears in `ps aux` but never binds its port. `sample <pid>` shows Python stuck in `__open_nocancel` during `Py_InitializeFromConfig`.
+
+**Cause:** macOS TCC (privacy controls) blocks launchd-spawned processes from accessing external volumes (`/Volumes/...`) until Full Disk Access is granted. The `open()` syscall hangs indefinitely waiting for user consent. This does not affect terminal-launched processes because Terminal.app already holds FDA and child processes inherit access.
+
+**Fix:** System Settings → Privacy & Security → Full Disk Access → `+` → navigate to `~/.local/bin/mcprt` → toggle on. Then restart the daemon:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.victor.mcprt
+```
+
+This applies to any mcprt-managed server whose binary lives outside `~/`. If you move servers to `~/` or a system path, FDA is not required.
+
+### Health check times out but the server process is running
+
+**Symptom:** `spawn failed: health check ... context deadline exceeded`. The server process appears in `ps aux`, is binding its port, and works when started manually — but mcprt gives up before it's ready.
+
+**Cause:** The default health check timeout is 5 seconds. Some servers (Python with heavy imports, Node.js with large dependency trees, anything loading ML models or doing OAuth init at startup) take longer. The 5s default fires before the process has finished initializing.
+
+**Diagnosis:**
+
+```bash
+# While the error is happening, check if the process IS running:
+ps aux | grep <server-name>
+
+# Check what port it bound (if any):
+lsof -i :<expected-port>
+```
+
+If the process shows up in `ps` and the port is bound, the issue is purely timing.
+
+**Fix:** Add `health_timeout` and `health_type = "tcp"` to the server spec:
+
+```toml
+[server.my-slow-server]
+exec           = ["/path/to/binary"]
+args           = ["--port", "${MCPRT_PORT}"]
+health_type    = "tcp"
+health_timeout = "20s"   # raise until cold-start consistently passes
+```
+
+Use `"tcp"` health type when the server doesn't expose an HTTP health endpoint — it just checks that the port is accepting connections, which happens earlier in startup than HTTP handlers being ready.
+
+**Rule of thumb for timeout values:**
+
+| Server type | Suggested `health_timeout` |
+|---|---|
+| Simple HTTP server | `5s` (default) |
+| Python with heavy imports (FastAPI, ADK, etc.) | `15s`–`20s` |
+| Node.js with large dependency tree | `10s`–`15s` |
+| Python loading ML model at startup | `30s`–`60s` |
 
 ---
 

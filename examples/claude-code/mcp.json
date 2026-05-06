@@ -1,24 +1,12 @@
 {
   "mcpServers": {
-    "vault-mcp": {
+    "my-python-mcp": {
       "type": "http",
-      "url": "http://localhost:9090/vault-mcp/mcp"
+      "url": "http://localhost:9090/my-python-mcp/mcp"
     },
-    "ga-vyledentistry": {
+    "my-node-mcp": {
       "type": "http",
-      "url": "http://localhost:9090/ga-vyledentistry/mcp"
-    },
-    "ga-victorqnguyen": {
-      "type": "http",
-      "url": "http://localhost:9090/ga-victorqnguyen/mcp"
-    },
-    "ga-surgifai": {
-      "type": "http",
-      "url": "http://localhost:9090/ga-surgifai/mcp"
-    },
-    "google-ads": {
-      "type": "http",
-      "url": "http://localhost:9090/google-ads/mcp"
+      "url": "http://localhost:9090/my-node-mcp/mcp"
     }
   }
 }

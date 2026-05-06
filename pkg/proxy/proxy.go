@@ -16,10 +16,11 @@ import (
 
 // ServerEntry bundles a supervisor with its refcounter.
 type ServerEntry struct {
-	Sup    *supervisor.Supervisor
-	Ref    *RefCounter
-	name   string
-	logger *slog.Logger
+	Sup          *supervisor.Supervisor
+	Ref          *RefCounter
+	SpawnTimeout time.Duration // overrides Handler.spawnTimeout for this server
+	name         string
+	logger       *slog.Logger
 }
 
 // Handler is the HTTP handler for the mcprt proxy. It routes on the first
@@ -84,7 +85,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// If the server is idle, spawn it and wait for it to become healthy.
 	if entry.Sup.CurrentState() == supervisor.StateIdle {
 		entry.logger.Info("cold start triggered", "method", r.Method, "path", tail)
-		ctx, cancel := context.WithTimeout(r.Context(), h.spawnTimeout)
+		spawnTimeout := h.spawnTimeout
+		if entry.SpawnTimeout > 0 {
+			spawnTimeout = entry.SpawnTimeout
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), spawnTimeout)
 		defer cancel()
 		if err := entry.Sup.Start(ctx); err != nil {
 			entry.logger.Error("spawn failed", "err", err)

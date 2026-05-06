@@ -1,0 +1,17 @@
+# binaries
+mcprt
+mcprt-*
+dist/
+
+# GoReleaser output
+*.tar.gz
+*.zip
+checksums.txt
+
+# macOS
+.DS_Store
+
+# editor
+.idea/
+.vscode/
+*.swp

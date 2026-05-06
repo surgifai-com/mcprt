@@ -171,7 +171,7 @@ func (r *Runtime) AllStats() []supervisor.Stats {
 // --- internal ---
 
 func (r *Runtime) registerServer(name string, spec manifest.ServerSpec, gracePeriod time.Duration, logDir string) {
-	port := r.allocPort(name)
+	port := r.allocPort(name, spec)
 
 	ref := proxy.NewRefCounter(gracePeriod, func() {
 		r.mu.RLock()
@@ -191,9 +191,17 @@ func (r *Runtime) registerServer(name string, spec manifest.ServerSpec, gracePer
 		}
 	})
 
+	var healthTimeout time.Duration
+	if spec.HealthTimeout != "" {
+		if d, err := time.ParseDuration(spec.HealthTimeout); err == nil {
+			healthTimeout = d
+		}
+	}
+
 	sup := supervisor.New(name, spec, port, supervisor.Options{
-		LogDir: logDir,
-		Logger: r.logger,
+		LogDir:        logDir,
+		Logger:        r.logger,
+		HealthTimeout: healthTimeout,
 		OnStateChange: func(n string, from, to supervisor.State) {
 			r.logger.Info("state change", "server", n, "from", from, "to", to)
 			if to == supervisor.StateRunning && r.OnSpawn != nil {
@@ -207,10 +215,14 @@ func (r *Runtime) registerServer(name string, spec manifest.ServerSpec, gracePer
 	r.refs[name] = ref
 	r.mu.Unlock()
 
-	r.handler.Register(name, &proxy.ServerEntry{Sup: sup, Ref: ref})
+	r.handler.Register(name, &proxy.ServerEntry{Sup: sup, Ref: ref, SpawnTimeout: healthTimeout})
 }
 
-func (r *Runtime) allocPort(name string) int {
+func (r *Runtime) allocPort(name string, spec manifest.ServerSpec) int {
+	if spec.Port > 0 {
+		r.ports[name] = spec.Port
+		return spec.Port
+	}
 	if p, ok := r.ports[name]; ok {
 		return p
 	}

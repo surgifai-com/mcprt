@@ -515,6 +515,12 @@ Use `"tcp"` health type when the server doesn't expose an HTTP health endpoint â
 
 ---
 
+---
+
+Built by [@victorqnguyen](https://github.com/victorqnguyen) Â· [surgifai-com](https://github.com/surgifai-com)
+
+---
+
 ## Contributing
 
 Apache 2.0. PRs welcome.

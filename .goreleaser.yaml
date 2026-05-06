@@ -56,6 +56,6 @@ release:
   github:
     owner: surgifai-com
     name: mcprt
-  draft: true
+  draft: false
   prerelease: auto
   name_template: "mcprt {{.Version}}"

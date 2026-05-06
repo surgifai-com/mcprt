@@ -212,12 +212,22 @@ mcprt  127.0.0.1:9090
 
 ### Install
 
+**Homebrew (macOS / Linux — recommended)**
+
+```sh
+brew install surgifai-com/tap/mcprt
+```
+
+**Go install**
+
 ```sh
 # Requires Go 1.21+
 go install github.com/surgifai-com/mcprt/cmd/mcprt@latest
-
-# Or download a pre-built binary from GitHub Releases and move it to your PATH
 ```
+
+**Binary**
+
+Download a pre-built archive for your platform from [GitHub Releases](https://github.com/surgifai-com/mcprt/releases), extract, and move `mcprt` to your `$PATH`.
 
 ---
 
@@ -440,7 +450,7 @@ Public API: `runtime.Runtime`, `manifest.Config`, `manifest.ServerSpec`, `proxy.
 - [ ] `mcprt logs <server>` — tail per-server stdout/stderr
 - [ ] `mcprt up <server>` / `mcprt down <server>` — manual overrides without editing config
 - [ ] Prometheus `/metrics` endpoint (opt-in, off by default)
-- [ ] Homebrew formula
+- [x] Homebrew formula (`surgifai-com/tap`)
 - [ ] systemd unit (`dist/systemd/`)
 - [ ] RSS + CPU sampling in `mcprt status` (gopsutil already a dep)
 
@@ -522,6 +532,6 @@ mcprt/
 │   ├── supervisor/ Process lifecycle state machine
 │   └── runtime/    Orchestrator, port allocator, fsnotify hot-reload
 ├── cmd/mcprt/      CLI (serve, validate, status)
-├── dist/           launchd plist template (systemd + Homebrew coming)
+├── dist/           launchd plist template (systemd coming)
 └── examples/       mcprt.toml + mcp.json for Claude Code
 ```

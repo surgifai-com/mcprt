@@ -15,10 +15,10 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/victorqnguyen/mcprt/pkg/manifest"
-	"github.com/victorqnguyen/mcprt/pkg/policy"
-	"github.com/victorqnguyen/mcprt/pkg/proxy"
-	"github.com/victorqnguyen/mcprt/pkg/supervisor"
+	"github.com/surgifai-com/mcprt/pkg/manifest"
+	"github.com/surgifai-com/mcprt/pkg/policy"
+	"github.com/surgifai-com/mcprt/pkg/proxy"
+	"github.com/surgifai-com/mcprt/pkg/supervisor"
 )
 
 // Runtime is the central coordinator.

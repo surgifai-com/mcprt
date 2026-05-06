@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/victorqnguyen/mcprt/pkg/manifest"
+	"github.com/surgifai-com/mcprt/pkg/manifest"
 )
 
 // Severity of a policy violation.

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/victorqnguyen/mcprt/cmd/mcprt/cli"
+	"github.com/surgifai-com/mcprt/cmd/mcprt/cli"
 )
 
 func main() {

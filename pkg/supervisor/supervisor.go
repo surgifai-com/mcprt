@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/victorqnguyen/mcprt/pkg/manifest"
+	"github.com/surgifai-com/mcprt/pkg/manifest"
 )
 
 // State represents the lifecycle state of a supervised server.

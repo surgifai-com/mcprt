@@ -214,7 +214,7 @@ mcprt  127.0.0.1:9090
 
 ```sh
 # Requires Go 1.21+
-go install github.com/victorqnguyen/mcprt/cmd/mcprt@latest
+go install github.com/surgifai-com/mcprt/cmd/mcprt@latest
 
 # Or download a pre-built binary from GitHub Releases and move it to your PATH
 ```
@@ -404,9 +404,9 @@ The CLI is one consumer of the library. Import it directly:
 
 ```go
 import (
-    "github.com/victorqnguyen/mcprt/pkg/manifest"
-    "github.com/victorqnguyen/mcprt/pkg/policy"
-    "github.com/victorqnguyen/mcprt/pkg/runtime"
+    "github.com/surgifai-com/mcprt/pkg/manifest"
+    "github.com/surgifai-com/mcprt/pkg/policy"
+    "github.com/surgifai-com/mcprt/pkg/runtime"
 )
 
 // Lint a manifest without starting anything

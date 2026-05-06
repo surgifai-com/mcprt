@@ -1,4 +1,4 @@
-module github.com/victorqnguyen/mcprt
+module github.com/surgifai-com/mcprt
 
 go 1.26.2
 

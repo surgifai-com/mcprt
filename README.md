@@ -161,53 +161,155 @@ mcprt  127.0.0.1:9090
 
 ## Quickstart
 
+### Install
+
 ```sh
-# Install
+# Requires Go 1.21+
 go install github.com/victorqnguyen/mcprt/cmd/mcprt@latest
 
-# Config
+# Or download a pre-built binary from GitHub Releases and move it to your PATH
+```
+
+---
+
+### Greenfield — first MCP server, starting fresh
+
+You have an MCP server binary and want mcprt to manage it. You haven't set anything up yet.
+
+**1. Write the config**
+
+```sh
 mkdir -p ~/.config/mcprt
-cat > ~/.config/mcprt/mcprt.toml << 'EOF'
+```
+
+```toml
+# ~/.config/mcprt/mcprt.toml
 [runtime]
 listen       = "127.0.0.1:9090"
 grace_period = "5s"
 
-[server.vault-mcp]
-exec        = ["/path/to/vault-mcp/.venv/bin/vault-mcp"]
+[server.my-mcp]
+exec        = ["/path/to/.venv/bin/my-mcp-server"]
 args        = ["--port", "${MCPRT_PORT}", "--host", "127.0.0.1"]
-health_path = "/health"
+health_type = "tcp"
+```
 
-[server.ga-mysite]
-exec = ["/path/to/analytics-mcp/.venv/bin/analytics-mcp"]
-args = ["--port", "${MCPRT_PORT}", "--host", "127.0.0.1"]
-env  = { GOOGLE_APPLICATION_CREDENTIALS = "~/.config/mcprt/secrets/mysite.json" }
-EOF
+**2. Validate and start**
 
-# Validate (catches STDIO violations before anything runs)
+```sh
 mcprt validate ~/.config/mcprt/mcprt.toml
-
-# Start
 mcprt serve
 ```
 
-**Point Claude Code at mcprt** (`~/.claude/mcp.json`):
+**3. Point your AI client at mcprt**
+
+Claude Code (`~/.claude/mcp.json`):
 
 ```json
 {
   "mcpServers": {
-    "vault-mcp":  { "type": "http", "url": "http://localhost:9090/vault-mcp/mcp" },
-    "ga-mysite":  { "type": "http", "url": "http://localhost:9090/ga-mysite/mcp" }
+    "my-mcp": { "type": "http", "url": "http://localhost:9090/my-mcp/mcp" }
   }
 }
 ```
 
-**macOS service** (starts at login):
+That's it. The server starts the first time Claude Code connects and stops when it disconnects (after `grace_period`).
+
+**4. Run as a background service (macOS)**
 
 ```sh
-# Edit dist/launchd/com.mcprt.daemon.plist — substitute YOUR_USERNAME
+# Substitute YOUR_USERNAME in the plist, then:
 cp dist/launchd/com.mcprt.daemon.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.mcprt.daemon.plist
 ```
+
+> **macOS + external volumes:** If any server binary lives on an external drive (`/Volumes/...`), grant Full Disk Access to `mcprt` in System Settings → Privacy & Security → Full Disk Access. See [Troubleshooting](#troubleshooting).
+
+---
+
+### Brownfield — migrating existing always-on servers
+
+You already have MCP servers running — launchd plists, shell scripts, or entries in `mcp.json` with `command`/`args` (STDIO). You want to stop managing them manually and let mcprt handle lifecycle.
+
+**1. Inventory what you have**
+
+```sh
+# launchd (macOS)
+ls ~/Library/LaunchAgents/ | grep mcp
+
+# Claude Desktop / Claude Code STDIO entries
+cat ~/.claude/mcp.json        # look for "command" / "args" keys — those are STDIO
+cat ~/Library/Application\ Support/Claude/claude_desktop_config.json
+```
+
+**2. For each server, find the binary and port pattern**
+
+- If the entry has `"command": "npx"` or `"command": "python"` — it's STDIO. You need to check whether the server supports Streamable HTTP; if not, it cannot run under mcprt.
+- If the server already binds an HTTP port, note how it accepts it: `--port`, `-p`, or an env var like `PORT`.
+
+**3. Write the mcprt manifest**
+
+```toml
+# ~/.config/mcprt/mcprt.toml
+[runtime]
+listen       = "127.0.0.1:9090"
+grace_period = "5s"
+
+# Server that takes --port as a CLI arg
+[server.my-existing-mcp]
+exec        = ["/path/to/existing-mcp-binary"]
+args        = ["--port", "${MCPRT_PORT}", "--host", "127.0.0.1"]
+health_type = "tcp"
+health_timeout = "15s"   # raise if startup is slow
+
+# Server that reads port from an env var
+[server.my-env-port-mcp]
+exec        = ["/path/to/.venv/bin/python", "-m", "my_mcp.server"]
+working_dir = "/path/to/project"
+env         = { PORT = "${MCPRT_PORT}" }
+health_type = "tcp"
+health_timeout = "15s"
+acknowledged_stdio_safe = true   # python binary confirmed to bind HTTP
+```
+
+**4. Validate**
+
+```sh
+mcprt validate ~/.config/mcprt/mcprt.toml
+```
+
+The validator will flag any spec that looks like STDIO. Fix those before proceeding.
+
+**5. Stop the always-on services**
+
+```sh
+# launchd
+launchctl unload ~/Library/LaunchAgents/com.myserver.plist
+
+# Or disable KeepAlive in the plist and reload
+```
+
+**6. Update your AI client config**
+
+Replace `"command"`/`"args"` STDIO entries with mcprt HTTP URLs:
+
+```json
+{
+  "mcpServers": {
+    "my-existing-mcp": { "type": "http", "url": "http://localhost:9090/my-existing-mcp/mcp" },
+    "my-env-port-mcp": { "type": "http", "url": "http://localhost:9090/my-env-port-mcp/mcp" }
+  }
+}
+```
+
+**7. Start mcprt and verify**
+
+```sh
+mcprt serve
+mcprt status   # should show all servers idle, 0 MB
+```
+
+Connect from your AI client — `mcprt status` should show each server transition `idle → running` on first use and back to `idle` after disconnect.
 
 ---
 

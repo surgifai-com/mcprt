@@ -135,8 +135,77 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("mcprt: upstream %q error: %v", name, err), http.StatusBadGateway)
 	}
 
+	// Rewrite redirect Location headers from upstream so they include the
+	// /<server-name> path prefix that mcprt mounts upstream at. Upstreams that
+	// return a 301/302/307/308 with Location: /some/path or
+	// Location: http://<request-host>/some/path are unaware of the prefix and
+	// would otherwise redirect the client to a path that bypasses the routing.
+	// Cross-host redirects are passed through unmodified.
+	reqHost := r.Host
+	rp.ModifyResponse = func(resp *http.Response) error {
+		loc := resp.Header.Get("Location")
+		if loc == "" {
+			return nil
+		}
+		rewritten := rewriteLocation(loc, name, reqHost)
+		if rewritten != loc {
+			resp.Header.Set("Location", rewritten)
+		}
+		return nil
+	}
+
 	entry.Sup.IncrRequests()
 	rp.ServeHTTP(w, r2)
+}
+
+// rewriteLocation prepends "/<serverName>" to the path of a Location header
+// from upstream when the redirect targets the same authority (same host) as
+// the incoming request. This keeps clients within the mcprt routing namespace
+// after following an upstream redirect.
+//
+// Cases:
+//   - Origin-relative path ("/x/y") that does NOT already begin with the prefix
+//     → "/<serverName>/x/y"
+//   - Absolute URL targeting the same host as the request, path missing prefix
+//     → same URL with path rewritten to "/<serverName>/..."
+//   - Already-prefixed paths, cross-host absolute URLs, and relative paths
+//     ("x/y" with no leading slash) → returned unmodified
+func rewriteLocation(loc, serverName, reqHost string) string {
+	prefix := "/" + serverName
+	hasPrefix := func(p string) bool {
+		return p == prefix || strings.HasPrefix(p, prefix+"/")
+	}
+
+	// Origin-relative path
+	if strings.HasPrefix(loc, "/") && !strings.HasPrefix(loc, "//") {
+		if hasPrefix(loc) {
+			return loc
+		}
+		return prefix + loc
+	}
+
+	// Try to parse as absolute URL
+	u, err := url.Parse(loc)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		// Relative path or unparseable — leave alone
+		return loc
+	}
+
+	// Cross-host redirect — leave alone
+	if u.Host != reqHost {
+		return loc
+	}
+
+	// Same-host absolute URL: rewrite path if missing prefix
+	if hasPrefix(u.Path) {
+		return loc
+	}
+	if u.Path == "" {
+		u.Path = prefix
+	} else {
+		u.Path = prefix + u.Path
+	}
+	return u.String()
 }
 
 // splitPath returns the first path segment and the remainder.
